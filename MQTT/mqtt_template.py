@@ -4,12 +4,14 @@ import paho.mqtt.client as mqtt
 
 # from private_logger import private_logger
 
-IS_PUB_WITHOUT_CONNECT = False  # Set to True, if want to publish without checking mqtt connection (msg will be queue at mqtt client)
-IS_PUB_LOG = True  # Set to True, to logging publish msg and publish CB information
+# Set to True, if want to publish without checking mqtt connection (msg will be queue at mqtt client)
+IS_PUB_WITHOUT_CONNECT = False
+# Set to True, to logging publish msg and publish CB information
+IS_PUB_LOG = True
 
 
 class FAKE_LOGGER():
-    def __init__():
+    def __init__(self):
         pass
 
     def info(self, string):
@@ -69,10 +71,10 @@ class MQTT_OBJ():
         # -----   Start Mqtt Engine  -----#
         self.client.loop_start()
 
+    ''' Input : sub_req = [("topic1" , qos , fun_cb) , ("topic2", qos, fun_cb), ....] '''
+
     def add_subscriber(self, sub_req):
-        '''
-        Input : sub_req = [("topic1" , qos , fun_cb) , ("topic2", qos, fun_cb), ....]
-        '''
+
         for i in sub_req:
             # ----------------  Valid check  ----------------#
             is_valid_subreq = True
@@ -82,7 +84,6 @@ class MQTT_OBJ():
                         j[1] = i[1]  # modified sub_qos as req asked
                     else:  # Igonre sub_req because this topic has already been sub.
                         is_valid_subreq = False
-
             # ----------------  Add sub_req to sub_list ------------------#
             if is_valid_subreq:
                 self.sub_list.append([i[0], i[1]])
@@ -93,14 +94,16 @@ class MQTT_OBJ():
         if self.sub_list != []:
             self.client.subscribe(self.sub_list)
 
+    '''
+    		This is a Non-blocking publish function.
+    		Output :
+    		    return : pub_rc
+    		Use pub_rc.is_published() to check publish has completed or not
+    		return None , for connection problem. In that case, user should publish msg again after connection is recovery.
+    '''
+
     def publish(self, topic, payload, qos, retain):
-        '''
-		This is a Non-blocking publish function.
-		Output :
-		    return : pub_rc
-		Use pub_rc.is_published() to check publish has completed or not
-		return None , for connection problem. In that case, user should publish msg again after connection is recovery.
-        '''
+
         if self.available == "offline" and (not IS_PUB_WITHOUT_CONNECT):
             return None
         else:
@@ -113,14 +116,15 @@ class MQTT_OBJ():
                     pub_rc[1]))  # pub_rc=(result,mid)
             return pub_rc
 
+    '''
+    		This is a blocking function, return until CB is get , or timeout.
+    		Output :
+    		    publish result : (0 , pub_rc)
+    			0 : something wrong is publishing , maybe timeout
+    			1 : successful published and CB
+            '''
+
     def publish_blocking(self, topic, payload, qos, retain, timeout=10):
-        '''
-		This is a blocking function, return until CB is get , or timeout.
-		Output :
-		    publish result : (0 , pub_rc)
-			0 : something wrong is publishing , maybe timeout
-			1 : successful published and CB
-        '''
         if self.available == "offline" and (not IS_PUB_WITHOUT_CONNECT):
             return (0, None)
         else:
@@ -159,6 +163,7 @@ class MQTT_OBJ():
         # Subscribing in on_connect() means that if we lose the connection and
         # reconnect then subscriptions will be renewed.
         self.logger.info("[MQTT] sub_list: " + str(self.sub_list))
+        # client.subscribe(self.sub_list)
         if self.sub_list != []:
             client.subscribe(self.sub_list)
 
@@ -168,6 +173,12 @@ class MQTT_OBJ():
             self.logger.info("[MQTT] on_disconnect - Unexpected disconnection." + mqtt.connack_string(rc))
         else:
             self.logger.info("[MQTT] on_disconnect - Successfully disconnect")
+
+    def client_disconnect(self):
+        self.logger.info("[MQTT] client_disconnect")
+        self.publish_blocking((self.client_id + "/available"), "offline", 2, True)
+        self.client.disconnect()  # disconnect gracefully
+        self.client.loop_stop()
 
     # The callback for when a PUBLISH message is received from the server.
     def on_message(self, client, userdata, message):
@@ -198,5 +209,3 @@ class MQTT_OBJ():
         # level == MQTT_LOG_INFO or MQTT_LOG_NOTICE or MQTT_LOG_WARNING, MQTT_LOG_ERR
         # The message itself is in buf
         # print "[on_log] : ", level, "  " , buf
-
-

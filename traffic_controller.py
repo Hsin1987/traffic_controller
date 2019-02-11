@@ -7,6 +7,7 @@ from MQTT.global_logger import logger
 import collections
 from collections import OrderedDict
 import json
+import requests
 import time
 import datetime
 import sys
@@ -17,9 +18,13 @@ import atexit
 lock = threading.Lock()
 
 robocall_ip = '192.168.30.132'
+elevator_server_ip = '192.168.30.132'
+autodoor_server_ip = '192.168.30.132'
 robots_list = ['001', '002']
 robot_mqtt_agent = {}
 mqtt_agent = None
+
+reboot_time = 3
 
 # Hotel Node Setting
 nodes_info = [['Station_001', 'Station_out_001', 'Station_002', 'Station_out_002',
@@ -45,12 +50,12 @@ floor_node_dict = OrderedDict()
 robots_registration = OrderedDict()
 # Robot Last position booking dict.
 robots_position = OrderedDict()
+# Robot online booking dict.
+robots_status = OrderedDict()
 # Robot Current Path booking dict.
 robots_path_record = OrderedDict()
 # Node registration booking dict.
 nodes_registration = OrderedDict()
-
-
 
 # RSS
 rss_on = True
@@ -60,10 +65,64 @@ rss_notification = WXAlarm()
 sqlite_file = '/home/ubuntu/amr_status_db.sqlite'
 
 
+def reboot_agent():
+    msg = "[TC][reboot_agent] Trigger Daily Reboot of the service system."
+    logger.info(msg)
+    reboot_elevator(elevator_server_ip)
+    reboot_autodoor(autodoor_server_ip)
+
+
+def reboot_elevator(ev_ip):
+    retry = 10
+    payload = {'pw': 'elevator_server'}
+
+    uri = 'http://' + ev_ip + ':8080/reboot'
+    for counter in range(retry):
+        try:
+            req = requests.get(uri, params=payload, timeout=3)
+            if req.ok:
+                logger.info('[TC][EV_Agent] Reboot EV.')
+                return True
+            else:
+                time.sleep(1.0)
+        except requests.exceptions.Timeout:
+            logger.info('[TC][EV_Agent] request timeout: ' + str(counter) + '/' + str(retry))
+            pass
+        except requests.exceptions.RequestException as e:
+            # catastrophic error. bail.
+            logger.info('[TC][EV_Agent] request exceptions: ' + str(e))
+
+    return False
+
+
+def reboot_autodoor(ip):
+    retry = 10
+    payload = {'pw': '@Advrobot'}
+
+    uri = 'http://' + ip + ':8080/reboot'
+    for counter in range(retry):
+        try:
+            req = requests.get(uri, params=payload, timeout=3)
+            if req.ok:
+                logger.info('[TC][Autodoor_Agent] Reboot EV.')
+                return True
+            else:
+                time.sleep(1.0)
+        except requests.exceptions.Timeout:
+            logger.info('[TC][Autodoor_Agent] request timeout: ' + str(counter) + '/' + str(retry))
+            pass
+        except requests.exceptions.RequestException as e:
+            # catastrophic error. bail.
+            logger.info('[TC][Autodoor_Agent] request exceptions: ' + str(e))
+
+    return False
+
+
 def exit_handler():
     c.close()
     conn.close()
     msg = "[Traffic Controller] Application is Ending."
+    mqtt_agent.client_disconnect()
     logger.info(msg)
 
 
@@ -227,7 +286,6 @@ def nodes_registration_init(info):
 
 def path_manager(client, userdata, message):
     global nodes_registration, robots_path_record, lock
-
     logger.info(
         "[path_manager] :  " + str(message.payload) + "(Q" + str(message.qos) + ", R" + str(
             message.retain) + ")")
@@ -271,7 +329,8 @@ def path_agent(robot_id, req_path):
     payload_str = json.dumps(allow_path)
 
     for counter in range(10):
-        mqtt_result = mqtt_agent.publish(topic=reply_topic, payload=payload_str, qos=2, retain=False)
+        mqtt_result = mqtt_agent.publish_blocking(topic=reply_topic, payload=payload_str,
+                                                  qos=2, retain=False, timeout=10)
         mqtt_rc = mqtt_result[1]
         if mqtt_rc is not None:
             logger.info(
@@ -283,9 +342,12 @@ def path_agent(robot_id, req_path):
 
 
 def amr_status_agent(client, userdata, message):
-    global nodes_registration, lock
+    global nodes_registration, lock, robots_status
     lock.acquire()
     amr_status_dict = convert(json.loads(message.payload))
+    # Update the robots_status
+    robots_status[amr_status_dict['r_id']] = amr_status_dict['status']
+
     if amr_status_dict['status'] == 'init':
         msg = "[TC][amr_status_agent] " + str(amr_status_dict['r_id']) + \
               " init position: " + str(amr_status_dict['position'])
@@ -308,7 +370,7 @@ def amr_status_agent(client, userdata, message):
                 node_list.append(node)
                 nodes_registration[node] = None
         msg = "[TC][amr_status_agent] " + str(amr_status_dict['r_id']) + \
-              "Shutdown Process, Clear legacy position: " + str(node_list)
+              " Shutdown Process, Clear legacy position: " + str(node_list)
         logger.info(msg)
         lock.release()
     else:
@@ -355,6 +417,7 @@ def traffic_controller():
         robots_path_record[robot_id] = None
         robots_position[robot_id] = None
         robots_registration[robot_id] = 'offline'
+        robots_status[robot_id] = None
 
         # sub MQTT Online Topic
         robot_available_topic = robot_id + "/available"
@@ -376,17 +439,30 @@ def traffic_controller():
     mqtt_agent.add_subscriber([('req_path', 2, path_manager)])
 
     # AMR Report Channel
-    robot_position_report_channel = "amr_position"
-    mqtt_agent.add_subscriber([(robot_position_report_channel, 2, robot_position_agent)])
+    # robot_position_report_channel = "amr_position"
+    # mqtt_agent.add_subscriber([(robot_position_report_channel, 2, robot_position_agent)])
 
     # Keep it Spinning.
     while True:
-        # Check Robot's alive
+        if time.localtime().tm_hour == reboot_time and time.localtime().tm_min == 0:
+            while True:
+                available_check = 0
+                print(robots_status)
+                for robot_id in robots_list:
+                    # Init the status
+                    if robots_status[robot_id] == "available":
+                        available_check += 1
 
-        # Update Robot's mission path
-
-        # ID robot issue.
-        time.sleep(0.1)
+                if available_check == len(robots_list):
+                    lock.acquire()
+                    logger.info('[TC] Start Daily Reboot.')
+                    reboot_agent()
+                else:
+                    time.sleep(10)
+        else:
+            time.sleep(10)
+            print(nodes_registration)
+            pass
 
 
 if __name__ == '__main__':
@@ -410,9 +486,11 @@ if __name__ == '__main__':
                                      EV_abort INTEGER, EV_entering_abort INTEGER, mb_abort INTEGER,
                                      mb_abort_counter INTEGER);""")
 
-        c.close()
-        conn.close()
+        # c.close()
+        # conn.close()
+        atexit.register(exit_handler)
         traffic_controller()
     except KeyboardInterrupt:
         print >> sys.stderr, '\nExiting by user request.\n'
         sys.exit(0)
+
